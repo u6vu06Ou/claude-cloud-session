@@ -57,6 +57,8 @@ def test_branch_prepended_to_prompt():
 def test_branch_not_duplicated_when_prompt_already_leads_with_it():
     out = cloudcode.build_prompt("Work on feat/x first please", "feat/x", "self")
     assert out.count("git checkout feat/x") == 0
+    # compact PR-base note is still added so the merge target is never lost
+    assert "PR base: `feat/x` (draft). Never target `main`." in out
     assert "Work on feat/x first please" in out
 
 
@@ -110,6 +112,13 @@ def test_resolve_worker_ask_noninteractive_falls_back_to_self():
     assert cloudcode.resolve_worker("ask", ask_fn=_eof) == "self"
 
 
+def test_resolve_worker_ctrl_c_propagates():
+    def _sigint(_q):
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        cloudcode.resolve_worker("ask", ask_fn=_sigint)
+
+
 # ---------- input validation ----------
 
 @pytest.mark.parametrize(
@@ -130,10 +139,14 @@ def test_valid_repo(repo, ok):
 @pytest.mark.parametrize(
     "branch,ok",
     [
-        ("main", True),
-        ("feat/x-2.0_rc", True),
+        ("main", True),          # name itself is legal; main as target is
+        ("feat/x-2.0_rc", True),  # rejected separately in main()
         ("bad branch", False),
         ("a..b", False),
+        ("a//b", False),
+        ("feat/", False),
+        ("x.lock", False),
+        ("main\n", False),
         ("feat/$(touch x)", False),
         ("", False),
     ],

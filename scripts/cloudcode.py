@@ -35,17 +35,19 @@ MAX_URL_LEN = 12000  # browsers and the web app get unreliable beyond ~16K; warn
 
 WORKER_CHOICES = ("self", "relay", "ask")
 
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+SEGMENT_RE = r"[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,99})?"
+REPO_RE = re.compile(SEGMENT_RE + "/" + SEGMENT_RE)
+BRANCH_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_])?")
+RESERVED_TARGETS = ("main", "master")
 
 WORKER_INSTRUCTIONS = {
     "self": (
         "[Worker mode: self]\n"
         "You are this cloud session's agent and you do the hands-on work yourself.\n"
-        "Before starting, run `printenv ANTHROPIC_BASE_URL` and confirm it prints "
-        "nothing (exit status 1): this session must run on its own claude.ai "
-        "account quota, not through a redirected backend. If the variable is set "
-        "to anything, stop and report back instead of working."
+        "Before starting, run `test -z \"$ANTHROPIC_BASE_URL\"` and confirm it "
+        "succeeds (exit 0): this session must run on its own claude.ai account "
+        "quota, not through a redirected backend. If the variable is set to "
+        "anything, stop and report back instead of working."
     ),
     "relay": (
         "[Worker mode: relay]\n"
@@ -89,11 +91,15 @@ def parse_remote(url: str) -> str | None:
 
 
 def valid_repo(repo: str | None) -> bool:
-    return bool(repo and REPO_RE.match(repo))
+    return bool(repo and REPO_RE.fullmatch(repo) and ".." not in repo)
 
 
 def valid_branch(branch: str | None) -> bool:
-    return bool(branch and BRANCH_RE.match(branch) and ".." not in branch)
+    """Accept only names git itself would take as a refname (simplified)."""
+    if not branch or not BRANCH_RE.fullmatch(branch):
+        return False
+    return (".." not in branch and "//" not in branch
+            and not branch.endswith(".lock"))
 
 
 def default_repo(cwd: str | None = None) -> str | None:
@@ -132,6 +138,8 @@ def build_prompt(prompt: str, branch: str | None, worker: str) -> str:
             f"state, then commit to your own working branch and open the pull "
             f"request with base `{branch}` (draft). Never target `main`."
         )
+    elif branch and "base" not in first_line:
+        parts.append(f"PR base: `{branch}` (draft). Never target `main`.")
     parts.append(prompt)
     return "\n\n".join(parts)
 
@@ -146,7 +154,7 @@ def resolve_worker(worker: str, ask_fn=input) -> str:
                 "Who does the hands-on work? "
                 "[self = the cloud agent itself / relay = your own model via relay] "
             ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:  # non-interactive stdin; Ctrl-C must NOT be swallowed
             print("non-interactive session: defaulting worker to 'self'",
                   file=sys.stderr)
             return "self"
@@ -206,10 +214,18 @@ def main(argv: list[str] | None = None) -> int:
             "pass --repo owner/repo"
         )
     if not valid_repo(repo):
-        ap.error(f"--repo must look like owner/repo (got '{repo}')")
-    if a.branch and not valid_branch(a.branch):
-        ap.error(f"--branch contains characters a branch name should not have "
-                 f"(got '{a.branch}')")
+        if a.repo:
+            ap.error(f"--repo must look like owner/repo (got '{repo}')")
+        ap.error(f"git remote origin did not yield a valid owner/repo "
+                 f"(got '{repo}'); pass --repo explicitly")
+    if a.branch:
+        if not valid_branch(a.branch):
+            ap.error(f"--branch contains characters a branch name should not "
+                     f"have (got '{a.branch}')")
+        if a.branch.lower() in RESERVED_TARGETS:
+            ap.error(f"--branch '{a.branch}' makes no sense here: it is the "
+                     "merge TARGET, and targeting main/master defeats the "
+                     "never-touch-main guardrail")
 
     worker = resolve_worker(a.worker)
     full_prompt = build_prompt(prompt, a.branch, worker)
@@ -225,10 +241,12 @@ def main(argv: list[str] | None = None) -> int:
         print(url)
     else:
         if not webbrowser.open(url):
-            print("could not open a browser; copy this URL yourself:", file=sys.stderr)
-            print(url)
+            print("could not ask a browser to open this; copy it yourself:",
+                  file=sys.stderr)
+            print(url, file=sys.stderr)
             return 1
-        print(f"browser opened: env={a.env or '(default)'} repo={repo} "
+        print(f"asked your default browser to open the session URL: "
+              f"env={a.env or '(default)'} repo={repo} "
               f"branch={a.branch or '(per prompt)'} worker={worker}")
         print("Check the environment/branch under the input box, then press Enter.")
     return 0
