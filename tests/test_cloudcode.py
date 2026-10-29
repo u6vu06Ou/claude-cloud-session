@@ -48,7 +48,8 @@ def test_branch_prepended_to_prompt():
     out = cloudcode.build_prompt("the real task", "feat/x", "self")
     lines = out.splitlines()
     assert any("git fetch origin && git checkout feat/x" in ln for ln in lines)
-    assert any("feat/x" in ln and "draft" in ln and "main" in ln for ln in lines)
+    # PR goes back to the branch as base; never main
+    assert any("base `feat/x` (draft)" in ln and "Never target `main`" in ln for ln in lines)
     # branch line comes before the user's prompt body
     assert out.index("git fetch origin") < out.index("the real task")
 
@@ -57,6 +58,17 @@ def test_branch_not_duplicated_when_prompt_already_leads_with_it():
     out = cloudcode.build_prompt("Work on feat/x first please", "feat/x", "self")
     assert out.count("git checkout feat/x") == 0
     assert "Work on feat/x first please" in out
+
+
+def test_branch_substring_coincidence_still_inserts():
+    # prompt mentions "Fix" — branch "x" must NOT count as mentioned
+    out = cloudcode.build_prompt("Fix the parser", "x", "self")
+    assert "git checkout x" in out
+
+
+def test_empty_prompt_does_not_crash_build_prompt():
+    out = cloudcode.build_prompt("", "feat/x", "self")
+    assert "git checkout feat/x" in out
 
 
 # ---------- worker modes ----------
@@ -90,6 +102,44 @@ def test_resolve_worker_ask_interactive():
     answers = iter(["nonsense", "relay"])
     picked = cloudcode.resolve_worker("ask", ask_fn=lambda _q: next(answers))
     assert picked == "relay"
+
+
+def test_resolve_worker_ask_noninteractive_falls_back_to_self():
+    def _eof(_q):
+        raise EOFError
+    assert cloudcode.resolve_worker("ask", ask_fn=_eof) == "self"
+
+
+# ---------- input validation ----------
+
+@pytest.mark.parametrize(
+    "repo,ok",
+    [
+        ("octo/proj", True),
+        ("octo-name/my.proj_2", True),
+        ("group/sub/proj", False),   # claude.ai/code takes GitHub owner/repo only
+        ("noplash", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_valid_repo(repo, ok):
+    assert cloudcode.valid_repo(repo) is ok
+
+
+@pytest.mark.parametrize(
+    "branch,ok",
+    [
+        ("main", True),
+        ("feat/x-2.0_rc", True),
+        ("bad branch", False),
+        ("a..b", False),
+        ("feat/$(touch x)", False),
+        ("", False),
+    ],
+)
+def test_valid_branch(branch, ok):
+    assert cloudcode.valid_branch(branch) is ok
 
 
 # ---------- repo derivation ----------

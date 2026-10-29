@@ -42,24 +42,24 @@ Every launched session gets a worker directive prepended to its opening prompt.
 
 ### `self` (default)
 
-The cloud claude.ai agent does the hands-on work itself, on its own paid quota. The directive tells it to first verify `ANTHROPIC_BASE_URL` is empty, i.e. it is really running on this cloud session's own account and not being redirected elsewhere.
+The cloud claude.ai agent does the hands-on work itself, on its own paid quota. The directive tells it to first verify `printenv ANTHROPIC_BASE_URL` prints nothing, i.e. it is really running on this cloud session's own account and not being redirected elsewhere.
 
 ### `relay`
 
 The cloud agent is **forbidden from doing hands-on implementation**. It acts purely as the orchestrator; the actual work is delegated to **the user's own model** through a relay. This plugin deliberately does NOT hard-code how that relay is wired — it depends on what the user has. When the user asks for relay mode, first do this locally:
 
 1. **Inventory what the user already runs**: a local OpenAI- or Anthropic-compatible proxy, Ollama, LiteLLM, a self-hosted gateway, ... Ask the user which backend should do the work, then decide the wiring for them.
-2. **Give it a public address**: the cloud sandbox cannot reach the user's LAN or `localhost`. The user needs a publicly reachable hop — e.g. a tunnel (cloudflared, Tailscale Funnel, ngrok) pointed at the local endpoint, or a tiny forwarder function running on a VPS/serverless host that proxies to their backend.
+2. **Give it a public address**: the cloud sandbox cannot reach the user's LAN or `localhost`. The user needs a publicly reachable hop — e.g. a tunnel (cloudflared, Tailscale Funnel, ngrok) pointed at the local endpoint, or a tiny forwarder function running on a VPS/serverless host that proxies to their backend. HTTPS only.
 3. **Agree on a shared secret** and put BOTH values into the cloud environment's variables on the web app (environment settings → secrets):
-   - `RELAY_URL` — the public HTTPS endpoint of the hop
+   - `RELAY_URL` — the FULL public HTTPS endpoint of the hop (path included, e.g. `.../v1/chat/completions`)
    - `RELAY_TOKEN` — the shared secret
 4. **Secrets live only in the cloud environment's variables. Never write them into the repo, the prompt, or a commit.**
 
-`examples/relay.sh` in this repo is a ready-to-adapt helper skeleton — it reads `$RELAY_URL` / `$RELAY_TOKEN` from the environment and POSTs a task to the relay; it contains no real URLs or keys. Ship it (or an equivalent) on the working branch so the orchestrator can call it directly.
+`examples/relay.sh` in this repo is a ready-to-adapt helper skeleton — it reads `$RELAY_URL` / `$RELAY_TOKEN` from the environment, refuses plain-http URLs, and POSTs a task to the relay; it contains no real URLs or keys. Adapt it, ship it on the working branch... and tell the cloud agent to **review the helper before running it** — it will see `RELAY_TOKEN`.
 
 ### `ask`
 
-The script stops and asks the user interactively to pick `self` or `relay` for that launch, then proceeds. Useful until the relay wiring is settled.
+The script stops and asks the user interactively to pick `self` or `relay` for that launch, then proceeds. In a non-interactive context it falls back to `self` with a stderr note. Useful until the relay wiring is settled.
 
 ## Rules
 

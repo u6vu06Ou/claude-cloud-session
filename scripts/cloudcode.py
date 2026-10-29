@@ -18,7 +18,8 @@ Usage:
     cloudcode.py --print ...          # only print the URL, do not open a browser
 
 --repo defaults to the owner/repo derived from the current folder's
-`git remote get-url origin`.
+`git remote get-url origin`. claude.ai/code works with GitHub repos, so only
+two-segment owner/repo names are accepted.
 """
 from __future__ import annotations
 
@@ -34,14 +35,17 @@ MAX_URL_LEN = 12000  # browsers and the web app get unreliable beyond ~16K; warn
 
 WORKER_CHOICES = ("self", "relay", "ask")
 
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
 WORKER_INSTRUCTIONS = {
     "self": (
         "[Worker mode: self]\n"
         "You are this cloud session's agent and you do the hands-on work yourself.\n"
-        "Before starting, run `echo $ANTHROPIC_BASE_URL` and confirm it prints "
-        "NOTHING: this session must run on its own claude.ai account quota, not "
-        "through a redirected backend. If the variable is set to anything, stop "
-        "and report back instead of working."
+        "Before starting, run `printenv ANTHROPIC_BASE_URL` and confirm it prints "
+        "nothing (exit status 1): this session must run on its own claude.ai "
+        "account quota, not through a redirected backend. If the variable is set "
+        "to anything, stop and report back instead of working."
     ),
     "relay": (
         "[Worker mode: relay]\n"
@@ -50,13 +54,15 @@ WORKER_INSTRUCTIONS = {
         "quota on hands-on work.\n"
         "Delegate every implementation item to the user's own model through the "
         "relay configured for this cloud environment:\n"
-        "- RELAY_URL (a public HTTPS endpoint) and RELAY_TOKEN (a shared secret) "
-        "are set as environment variables. Verify both exist before delegating "
-        "anything; if either is missing, stop and ask instead of doing the work "
-        "yourself.\n"
-        "- If the repo ships a helper such as relay.sh, call it. Otherwise call "
-        "the relay with curl: POST the task text to $RELAY_URL with an "
-        "Authorization header that carries $RELAY_TOKEN.\n"
+        "- RELAY_URL (the full public HTTPS endpoint of the relay) and "
+        "RELAY_TOKEN (a shared secret) are set as environment variables. Verify "
+        "both exist before delegating anything; if either is missing, stop and "
+        "ask instead of doing the work yourself.\n"
+        "- If the repo ships a relay helper such as relay.sh, REVIEW it first — "
+        "it will see RELAY_TOKEN — and only then call it. Otherwise call the "
+        "relay with curl: POST the task to $RELAY_URL with an Authorization "
+        "header that carries $RELAY_TOKEN; the payload shape is up to the relay "
+        "(see examples/relay.sh for a reference).\n"
         "You stay in charge of planning, splitting work, reviewing the returned "
         "diffs, committing, and opening the PR."
     ),
@@ -64,7 +70,11 @@ WORKER_INSTRUCTIONS = {
 
 
 def parse_remote(url: str) -> str | None:
-    """Extract ``owner/repo`` from a git remote URL (https, ssh or scp form)."""
+    """Extract ``owner/repo`` from a git remote URL (https, ssh or scp form).
+
+    Returns None for anything that is not exactly two path segments, which is
+    what claude.ai/code's ``repositories`` parameter accepts (GitHub).
+    """
     url = (url or "").strip()
     m = re.match(
         r"^(?:https?|ssh|git)://(?:[^@/]+@)?[^/]+/([^/]+)/([^/]+?)(?:\.git)?/?$",
@@ -76,6 +86,14 @@ def parse_remote(url: str) -> str | None:
     if m:
         return f"{m.group(1)}/{m.group(2)}"
     return None
+
+
+def valid_repo(repo: str | None) -> bool:
+    return bool(repo and REPO_RE.match(repo))
+
+
+def valid_branch(branch: str | None) -> bool:
+    return bool(branch and BRANCH_RE.match(branch) and ".." not in branch)
 
 
 def default_repo(cwd: str | None = None) -> str | None:
@@ -95,28 +113,43 @@ def default_repo(cwd: str | None = None) -> str | None:
     return parse_remote(r.stdout)
 
 
+def _branch_mentioned(first_line: str, branch: str) -> bool:
+    """Whole-token match so `fix` does not count as mentioning branch `x`."""
+    return bool(re.search(
+        r"(?<![A-Za-z0-9._/-])" + re.escape(branch) + r"(?![A-Za-z0-9._/-])",
+        first_line,
+    ))
+
+
 def build_prompt(prompt: str, branch: str | None, worker: str) -> str:
     """Compose the opening prompt: worker directive first, then branch, then body."""
     parts = [WORKER_INSTRUCTIONS[worker]]
-    if branch and branch not in prompt.splitlines()[0]:
+    first_line = prompt.splitlines()[0] if prompt else ""
+    if branch and not _branch_mentioned(first_line, branch):
         parts.append(
-            f"Branch: work on `{branch}`. First run "
-            f"`git fetch origin && git checkout {branch}`; open the pull request "
-            f"back to `{branch}` (as a draft) and never touch `main`."
+            f"Branch: the merge target is `{branch}`. Run "
+            f"`git fetch origin && git checkout {branch}` to see the starting "
+            f"state, then commit to your own working branch and open the pull "
+            f"request with base `{branch}` (draft). Never target `main`."
         )
     parts.append(prompt)
     return "\n\n".join(parts)
 
 
 def resolve_worker(worker: str, ask_fn=input) -> str:
-    """Turn ``ask`` into a concrete mode by asking the user interactively."""
+    """Turn ``ask`` into a concrete mode; non-interactive sessions fall back to self."""
     if worker != "ask":
         return worker
     while True:
-        ans = ask_fn(
-            "Who does the hands-on work? "
-            "[self = the cloud agent itself / relay = your own model via relay] "
-        ).strip().lower()
+        try:
+            ans = ask_fn(
+                "Who does the hands-on work? "
+                "[self = the cloud agent itself / relay = your own model via relay] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("non-interactive session: defaulting worker to 'self'",
+                  file=sys.stderr)
+            return "self"
         if ans in ("self", "relay"):
             return ans
         print("Please answer 'self' or 'relay'.", file=sys.stderr)
@@ -141,24 +174,30 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="owner/repo; default: derived from this folder's git remote origin",
     )
-    ap.add_argument("--branch", help="working branch (written into the opening prompt)")
+    ap.add_argument("--branch", help="merge-target branch (written into the prompt)")
     ap.add_argument(
         "--worker",
         choices=WORKER_CHOICES,
         default="self",
         help="who does the hands-on work: 'self' = the cloud agent (default), "
-        "'relay' = delegate to your own model, 'ask' = choose interactively",
+        "'relay' = delegate to your own model, 'ask' = choose interactively "
+        "(falls back to 'self' when non-interactive)",
     )
     ap.add_argument("--print", action="store_true", help="only print the URL")
     a = ap.parse_args(argv)
 
     if a.prompt_file:
-        with open(a.prompt_file, encoding="utf-8-sig") as f:
-            prompt = f.read().strip()
+        try:
+            with open(a.prompt_file, encoding="utf-8-sig") as f:
+                prompt = f.read().strip()
+        except OSError as e:
+            ap.error(f"cannot read --prompt-file {a.prompt_file}: {e}")
     elif a.prompt:
         prompt = a.prompt.strip()
     else:
         ap.error("give an opening prompt or --prompt-file")
+    if not prompt:
+        ap.error("opening prompt is empty")
 
     repo = a.repo or default_repo()
     if not repo:
@@ -166,6 +205,11 @@ def main(argv: list[str] | None = None) -> int:
             "could not derive owner/repo from `git remote get-url origin`; "
             "pass --repo owner/repo"
         )
+    if not valid_repo(repo):
+        ap.error(f"--repo must look like owner/repo (got '{repo}')")
+    if a.branch and not valid_branch(a.branch):
+        ap.error(f"--branch contains characters a branch name should not have "
+                 f"(got '{a.branch}')")
 
     worker = resolve_worker(a.worker)
     full_prompt = build_prompt(prompt, a.branch, worker)
@@ -180,7 +224,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.print:
         print(url)
     else:
-        webbrowser.open(url)
+        if not webbrowser.open(url):
+            print("could not open a browser; copy this URL yourself:", file=sys.stderr)
+            print(url)
+            return 1
         print(f"browser opened: env={a.env or '(default)'} repo={repo} "
               f"branch={a.branch or '(per prompt)'} worker={worker}")
         print("Check the environment/branch under the input box, then press Enter.")

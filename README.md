@@ -44,9 +44,11 @@ python scripts/cloudcode.py --env my-env --branch feat/x --worker self --prompt-
 
 ## Worker modes (`--worker self|relay|ask`)
 
-- **`self`** (default): the cloud agent does the work itself. The opener tells it to first confirm `ANTHROPIC_BASE_URL` is empty, i.e. it is really on this cloud session's own account quota.
-- **`relay`**: the cloud agent becomes orchestrator-only — it may not touch code and must delegate implementation to *your own model* through a relay you set up: a publicly reachable endpoint (a tunnel such as cloudflared/Tailscale Funnel/ngrok in front of your local OpenAI/Anthropic-compatible service, Ollama or LiteLLM, or a small forwarder on a VPS) plus a shared secret, both stored as the cloud environment's variables `RELAY_URL` / `RELAY_TOKEN`. **Secrets live only in the cloud environment variables — never in the repo.** A ready-to-adapt helper skeleton is at [`examples/relay.sh`](examples/relay.sh). The skill tells your local Claude to inventory your options and ask you before deciding the exact wiring.
-- **`ask`**: the script prompts you to pick `self` or `relay` on every launch.
+- **`self`** (default): the cloud agent does the work itself. The opener tells it to first confirm `printenv ANTHROPIC_BASE_URL` prints nothing, i.e. it is really on this cloud session's own account quota.
+- **`relay`**: the cloud agent becomes orchestrator-only — it may not touch code and must delegate implementation to *your own model* through a relay you set up: a publicly reachable HTTPS endpoint (a tunnel such as cloudflared/Tailscale Funnel/ngrok in front of your local OpenAI/Anthropic-compatible service, Ollama or LiteLLM, or a small forwarder on a VPS) plus a shared secret, both stored as the cloud environment's variables `RELAY_URL` (the full endpoint URL, path included) / `RELAY_TOKEN`. **Secrets live only in the cloud environment variables — never in the repo.** A ready-to-adapt helper skeleton is at [`examples/relay.sh`](examples/relay.sh) — review any helper before the cloud agent runs it, since it can see the token. The skill tells your local Claude to inventory your options and ask you before deciding the exact wiring.
+- **`ask`**: the script prompts you to pick `self` or `relay` on every launch (falls back to `self` when non-interactive).
+
+**Privacy note:** the opening prompt travels in a URL query string, so it lands in browser history (including sync) and any proxy/server logs on the way. Keep secrets and sensitive detail out of the prompt — put them in repo files on the branch or in the cloud environment's secret variables.
 
 ## Known limits
 
