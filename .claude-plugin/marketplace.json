@@ -1,0 +1,14 @@
+{
+  "name": "cloud-session",
+  "description": "Launch and steer claude.ai/code cloud agent sessions from local Claude Code.",
+  "owner": {
+    "name": "u6vu06Ou"
+  },
+  "plugins": [
+    {
+      "name": "cloud-session",
+      "source": "./",
+      "description": "Start new claude.ai/code cloud sessions (pre-filled URL, worker modes) and send messages into running ones, on your own claude.ai account."
+    }
+  ]
+}

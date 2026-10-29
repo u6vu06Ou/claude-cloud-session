@@ -1,0 +1,13 @@
+{
+  "name": "cloud-session",
+  "displayName": "Cloud Session",
+  "version": "0.1.0",
+  "description": "Start and steer claude.ai/code cloud sessions from your local Claude Code: pre-filled launch URLs, worker modes, and a send-message helper.",
+  "author": {
+    "name": "u6vu06Ou"
+  },
+  "homepage": "https://github.com/u6vu06Ou/claude-cloud-session",
+  "repository": "https://github.com/u6vu06Ou/claude-cloud-session",
+  "license": "MIT",
+  "keywords": ["cloud-session", "claude-code", "orchestration", "cloud-agents"]
+}

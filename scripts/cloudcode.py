@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Open a NEW claude.ai/code cloud session through the official pre-filled URL.
+
+The URL format is the documented pre-fill form:
+    https://claude.ai/code?prompt=...&repositories=owner/repo&environment=NAME
+(see https://code.claude.com/docs/en/web-quickstart#pre-fill-sessions)
+
+The URL has NO branch parameter, so the script writes the branch into the
+opening prompt itself. The URL opens in the user's default browser, which is
+expected to already be logged in to claude.ai — the session runs on the user's
+own claude.ai account quota, not on any API key.
+
+Python 3 standard library only; works on Windows, macOS and Linux.
+
+Usage:
+    cloudcode.py --env my-env --branch feat/x --prompt-file opener.md
+    cloudcode.py --repo owner/repo "Write the opener text directly"
+    cloudcode.py --print ...          # only print the URL, do not open a browser
+
+--repo defaults to the owner/repo derived from the current folder's
+`git remote get-url origin`.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+import urllib.parse
+import webbrowser
+
+BASE_URL = "https://claude.ai/code"
+MAX_URL_LEN = 12000  # browsers and the web app get unreliable beyond ~16K; warn earlier
+
+WORKER_CHOICES = ("self", "relay", "ask")
+
+WORKER_INSTRUCTIONS = {
+    "self": (
+        "[Worker mode: self]\n"
+        "You are this cloud session's agent and you do the hands-on work yourself.\n"
+        "Before starting, run `echo $ANTHROPIC_BASE_URL` and confirm it prints "
+        "NOTHING: this session must run on its own claude.ai account quota, not "
+        "through a redirected backend. If the variable is set to anything, stop "
+        "and report back instead of working."
+    ),
+    "relay": (
+        "[Worker mode: relay]\n"
+        "You are the ORCHESTRATOR ONLY. Do not implement, edit, or refactor code "
+        "yourself in this session, and do not spend this cloud session's paid "
+        "quota on hands-on work.\n"
+        "Delegate every implementation item to the user's own model through the "
+        "relay configured for this cloud environment:\n"
+        "- RELAY_URL (a public HTTPS endpoint) and RELAY_TOKEN (a shared secret) "
+        "are set as environment variables. Verify both exist before delegating "
+        "anything; if either is missing, stop and ask instead of doing the work "
+        "yourself.\n"
+        "- If the repo ships a helper such as relay.sh, call it. Otherwise call "
+        "the relay with curl: POST the task text to $RELAY_URL with an "
+        "Authorization header that carries $RELAY_TOKEN.\n"
+        "You stay in charge of planning, splitting work, reviewing the returned "
+        "diffs, committing, and opening the PR."
+    ),
+}
+
+
+def parse_remote(url: str) -> str | None:
+    """Extract ``owner/repo`` from a git remote URL (https, ssh or scp form)."""
+    url = (url or "").strip()
+    m = re.match(
+        r"^(?:https?|ssh|git)://(?:[^@/]+@)?[^/]+/([^/]+)/([^/]+?)(?:\.git)?/?$",
+        url,
+    )
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    m = re.match(r"^[^@/]+@[^:]+:([^/]+)/([^/]+?)(?:\.git)?/?$", url)  # git@host:owner/repo
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def default_repo(cwd: str | None = None) -> str | None:
+    """owner/repo from the current folder's ``git remote get-url origin``."""
+    try:
+        r = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return parse_remote(r.stdout)
+
+
+def build_prompt(prompt: str, branch: str | None, worker: str) -> str:
+    """Compose the opening prompt: worker directive first, then branch, then body."""
+    parts = [WORKER_INSTRUCTIONS[worker]]
+    if branch and branch not in prompt.splitlines()[0]:
+        parts.append(
+            f"Branch: work on `{branch}`. First run "
+            f"`git fetch origin && git checkout {branch}`; open the pull request "
+            f"back to `{branch}` (as a draft) and never touch `main`."
+        )
+    parts.append(prompt)
+    return "\n\n".join(parts)
+
+
+def resolve_worker(worker: str, ask_fn=input) -> str:
+    """Turn ``ask`` into a concrete mode by asking the user interactively."""
+    if worker != "ask":
+        return worker
+    while True:
+        ans = ask_fn(
+            "Who does the hands-on work? "
+            "[self = the cloud agent itself / relay = your own model via relay] "
+        ).strip().lower()
+        if ans in ("self", "relay"):
+            return ans
+        print("Please answer 'self' or 'relay'.", file=sys.stderr)
+
+
+def build_url(prompt: str, repo: str, env: str | None) -> str:
+    q = {"prompt": prompt, "repositories": repo}
+    if env:
+        q["environment"] = env
+    return BASE_URL + "?" + urllib.parse.urlencode(q, quote_via=urllib.parse.quote)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Open a new claude.ai/code cloud session via a pre-filled URL."
+    )
+    ap.add_argument("prompt", nargs="?", help="opening prompt (or use --prompt-file)")
+    ap.add_argument("--prompt-file", help="file holding the opening prompt (UTF-8)")
+    ap.add_argument("--env", help="cloud environment name as created on the web app")
+    ap.add_argument(
+        "--repo",
+        default=None,
+        help="owner/repo; default: derived from this folder's git remote origin",
+    )
+    ap.add_argument("--branch", help="working branch (written into the opening prompt)")
+    ap.add_argument(
+        "--worker",
+        choices=WORKER_CHOICES,
+        default="self",
+        help="who does the hands-on work: 'self' = the cloud agent (default), "
+        "'relay' = delegate to your own model, 'ask' = choose interactively",
+    )
+    ap.add_argument("--print", action="store_true", help="only print the URL")
+    a = ap.parse_args(argv)
+
+    if a.prompt_file:
+        with open(a.prompt_file, encoding="utf-8-sig") as f:
+            prompt = f.read().strip()
+    elif a.prompt:
+        prompt = a.prompt.strip()
+    else:
+        ap.error("give an opening prompt or --prompt-file")
+
+    repo = a.repo or default_repo()
+    if not repo:
+        ap.error(
+            "could not derive owner/repo from `git remote get-url origin`; "
+            "pass --repo owner/repo"
+        )
+
+    worker = resolve_worker(a.worker)
+    full_prompt = build_prompt(prompt, a.branch, worker)
+
+    url = build_url(full_prompt, repo, a.env)
+    if len(url) > MAX_URL_LEN:
+        print(
+            f"warning: URL is {len(url)} characters; shorten the prompt or move "
+            "the brief into a file on the repo and tell the agent to read it",
+            file=sys.stderr,
+        )
+    if a.print:
+        print(url)
+    else:
+        webbrowser.open(url)
+        print(f"browser opened: env={a.env or '(default)'} repo={repo} "
+              f"branch={a.branch or '(per prompt)'} worker={worker}")
+        print("Check the environment/branch under the input box, then press Enter.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
